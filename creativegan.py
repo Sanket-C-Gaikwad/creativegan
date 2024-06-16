@@ -115,8 +115,12 @@ def segment(seg_model, images, ch=3, size=(224,224), threshold=0.5):
     images_tensor = torch.empty((len(images), ch, size[0], size[1]))
     for i in range(len(images)):
         images_tensor[i] = trans(images[i])
-        
-    seg_masks = seg_model(images_tensor.cuda()).sigmoid().detach().cpu()
+    
+    # Move tensors to CPU
+    seg_model = seg_model.to('cpu')
+    images_tensor = images_tensor.to('cpu')
+
+    seg_masks = seg_model(images_tensor).sigmoid().detach().cpu()
     seg_masks = torch.where(seg_masks > threshold, torch.ones(seg_masks.size()), torch.zeros(seg_masks.size()))
     return seg_masks
 
@@ -191,6 +195,9 @@ if __name__ == '__main__':
     elif ganname == 'proggan':
         model = utils.proggan.load_pretrained(modelname)
         Rewriter = ganrewrite.ProgressiveGanRewriter
+
+    # Move model to CPU
+    model = model.to('cpu')
         
     # Create a Rewriter object - this implements our method.
     zds = zdataset.z_dataset_for_model(model, size=size)
@@ -202,209 +209,4 @@ if __name__ == '__main__':
 
     # Display a user interface to allow model rewriting.
     savedir = f'masks/{ganname}/{modelname}'
-    interface = rewriteapp.GanRewriteApp(gw, size=256, mask_dir=savedir, num_canvases=32)
-
-    # Create detector instance given a directory of the normal images
-    ad = anomaly.AnomalyDetector(data_path, name=name, topk=k)
-
-    # Extract and cache embeddings of the normal images
-    ad.load_train_features()
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    seg_model = unet.ResNetUNet(seg_class).cuda()
-
-    seg_model.load_state_dict(torch.load(seg_model_path))
-    seg_model.eval()
-
-    print('unet loaded')
-
-    # Copy Mask
-    image = gw.render_image(copy_id)
-    copy_anomaly = ad.predict_anomaly_masks([image])
-    copy_mask = ad.threshold_masks(copy_anomaly, threshold=anomaly_threshold)[0]
-    seg_mask = segment(seg_model, [image])[0]
-
-    best_ch = find_best_seg_match(copy_mask, seg_mask.numpy(), channels=channels)
-    mask = seg_mask[best_ch].numpy()
-    if dilate_mask:
-        mask = dilate(mask, kernel_size=dilate_kernel_size)
-    mask = Image.fromarray(mask.astype('uint8')*255, mode='L')
-    area = (renormalize.from_image(mask, target='pt', size=(512,512))[0] > 0.25)
-    mask_url = renormalize.as_url(mask)
-    obj_acts, obj_output, obj_area, bounds = (gw.object_from_selection(copy_id, mask_url))
-    interface.request['object'] = (copy_id, mask_url)
-
-
-    # Paste Mask
-    image = gw.render_image(paste_id)
-    seg_mask = segment(seg_model, [image])[0]
-    if not use_copy_as_paste_mask:
-        mask = seg_mask[best_ch].numpy()
-        if dilate_mask:
-            mask = dilate(mask, kernel_size=dilate_kernel_size)
-        mask = Image.fromarray(mask.astype('uint8')*255, mode='L')
-    area = (renormalize.from_image(mask, target='pt', size=(512,512))[0] > 0.25)
-    mask_url = renormalize.as_url(mask)
-    interface.request['paste'] = (paste_id, mask_url)
-
-    # Render Paste Image
-    goal_in, goal_out, viz_out, bounds = gw.paste_from_selection(paste_id, mask_url, obj_acts, obj_area)
-    imgout = renormalize.as_url(gw.render_object(viz_out, box=bounds))
-    render_image = gw.render_object(viz_out, box=bounds)
-
-    #Context Mask
-    images = gw.render_image_batch(key_ids)
-    seg_masks = segment(seg_model, images)
-
-    best_seg_masks = seg_masks.permute(1,0,2,3)[best_ch]
-    interface.request['key'] = []
-    for i, idx in enumerate(key_ids):
-        mask = best_seg_masks[i].numpy()
-        if dilate_mask:
-            mask = dilate(mask, kernel_size=dilate_kernel_size)
-        mask = Image.fromarray(mask.astype('uint8')*255, mode='L')
-        area = (renormalize.from_image(mask, target='pt', size=(512,512))[0] > 0.25)
-        mask_url = renormalize.as_url(mask)
-        interface.request['key'].append((idx, mask_url))
-
-    # Rewriting
-    def update_callback(it, loss):
-        if it % 50 == 0 or it == niter - 1:
-            loss_info = (f'lr {lr:.4f}\titer {it: 6d}/{niter: 6d}'
-                        f'\tloss {loss.item():.4f}')
-            print(loss_info, end='\r')
-                    
-    gw.apply_edit(interface.request,
-                              rank=rank, niter=niter, piter=10, lr=lr,
-                              update_callback=update_callback)
-
-
-    imgnum, mask = interface.request['key'][0]
-    key = gw.query_key_from_selection(imgnum, mask)
-    sel, rq = gw.ranking_for_key(key, k=200)
-    img_nums = sel.tolist()
-
-
-    saved_state_dict = copy.deepcopy(gw.model.state_dict())
-
-    with torch.no_grad():
-        gw.model.load_state_dict(saved_state_dict)
-        edited_images = gw.render_image_batch(img_nums)
-        gw.model.load_state_dict(interface.original_model.state_dict())
-        images = gw.render_image_batch(img_nums)
-
-        
-    # Visualize Result
-    offset = 2
-    n = n_outputs
-    n_col = 3
-
-    mask_savedir = "rewriting_masks"
-    result_savedir = "rewriting_results"
-
-    row = n//n_col
-    col = n_col * 2
-    fig, axes = plt.subplots(offset + row, col, figsize=(col*3, (offset+row)*3))
-
-    for ax in axes.ravel():
-        ax.axis('off')
-
-    req = interface.request
-
-    obj = render_mask(req['object'], gw)
-    paste = render_mask(req['paste'], gw)
-    axes[0, 0].imshow(obj)
-    axes[0, 0].title.set_text('Copy')
-    axes[0, 1].imshow(paste)
-    axes[0, 1].title.set_text('Paste')
-    axes[0, 2].imshow(render_image)
-
-    axes[1, 0].title.set_text('Context')
-    for i in range(min(n, len(req['key']))):
-        context = render_mask(req['key'][i], gw)
-        axes[1, i].imshow(context)
-
-
-    for c in range(n_col):
-        axes[offset, c*2].title.set_text('Original')
-        axes[offset, c*2+1].title.set_text('Rewritten')
-
-    for i in range(n):
-        axes[offset+i%row, i//row*2].imshow(images[i])
-        axes[offset+i%row, i//row*2 + 1].imshow(edited_images[i])
-        
-    fig.show()
-
-    # Save Result
-    os.makedirs(mask_savedir, exist_ok=True)
-    os.makedirs(result_savedir, exist_ok=True)
-
-    overwrite = False
-    ver = 0
-    name = f"{modelname}_c{copy_id}_p{paste_id}_layer{layernum}_rank{rank}_exp"
-
-    while os.path.exists(os.path.join(result_savedir, name+str(ver)+'.png')) and not overwrite:
-        ver += 1
-    name = name + str(ver)
-    fig.savefig(os.path.join(result_savedir, name), bbox_inches='tight')
-    data = interface.request
-    data['sel'] = img_nums
-
-    def convert(o):
-        if isinstance(o, np.int64): return int(o)  
-        raise TypeError
-
-    with open(os.path.join(mask_savedir, '%s.json' % name), 'w') as f:
-        json.dump(data, f, indent=1, default=convert)
-
-    
-    if args.ssim:
-        modified_dir = 'generated/modified'
-        if os.path.exists(modified_dir):
-            shutil.rmtree(modified_dir)
-        os.makedirs(modified_dir)
-
-        gw.model.load_state_dict(saved_state_dict)
-        edited_images = gw.render_image_batch(list(range(100)))
-        for i, im in enumerate(edited_images):
-            filename = f'{i}.png'
-            filename = os.path.join(modified_dir, filename)
-            im.save(filename)
-        
-        from torch.utils.data import DataLoader
-        
-        # SSIM NOVELTY
-        batch_size = 500
-        gen_dataset1 = anomaly.NormalDataset(modified_dir, n=100, grayscale=False, normalize=False, resize=224, cropsize=224)
-        gen_dataset2 = anomaly.NormalDataset(data_path, grayscale=False, normalize=False, resize=224, cropsize=224)
-        gen_loader1 = DataLoader(gen_dataset1, batch_size=1, pin_memory=True)
-        gen_loader2 = DataLoader(gen_dataset2, batch_size=batch_size, pin_memory=True)
-        n = len(gen_dataset1)
-        m = len(gen_dataset2)
-        ssim_mat = torch.zeros((n, m))
-    
-        for i, xb in enumerate(gen_loader1):
-            x = xb.repeat(batch_size, 1, 1, 1)
-            for j, y in enumerate(gen_loader2):
-                if len(y) < batch_size:
-                    x = xb.repeat(len(y), 1, 1, 1)
-                ssim_mat[i][j*batch_size:j*batch_size+len(y)] = (1 - ssim(x.cuda(), y.cuda(), data_range=1, size_average=False))/2
-
-        # print('SSIM Mean: ', ssim_mat.mean().numpy())
-        # print('SSIM Top 1 Mean: ', torch.topk(ssim_mat, k=1).values.mean().numpy())
-        # print('SSIM Top 5 Mean: ', torch.topk(ssim_mat, k=5).values.mean().numpy())
-        # print('SSIM Top 10 Mean: ', torch.topk(ssim_mat, k=10).values.mean().numpy())
-        # print('SSIM Top 20 Mean: ', torch.topk(ssim_mat, k=20).values.mean().numpy())
-        print('SSIM Top 50 Mean: ', torch.topk(ssim_mat, k=50).values.mean().numpy())
-
-    if args.novelty_score:
-        anomaly_scores = []
-        for i in range(0, 1000, 100):
-            images = gw.render_image_batch(list(range(i,i+100)))
-            scores = ad.predict_anomaly_scores(images)
-            anomaly_scores.append(scores)
-
-        anomaly_scores = np.concatenate(anomaly_scores)
-        print('Average Novelty Score', anomaly_scores.mean())
-
-        
+    interface = rewriteapp.GanRewriteApp(gw, size=256, mask_dir=savedir, num
