@@ -542,7 +542,7 @@ class NoiseInjectionF(nn.Module):
         if noise is None:
             noise = np.random.RandomState(0).randn(
                     batch, height * width).astype('float32')
-            noise = torch.from_numpy(noise).cuda().view(batch, 1, height, width)
+            noise = torch.from_numpy(noise).cpu().view(batch, 1, height, width)
         return DataBag(data, fmap=image + self.weight * noise)
 
 class ConstantInputF(nn.Module):
@@ -649,7 +649,7 @@ class ToRGBF(nn.Module):
                     skip = self.upsample(skip)
                 else:
                     # print('Missing upsample!')
-                    upsample = Upsample([1, 3, 3, 1]).cuda()
+                    upsample = Upsample([1, 3, 3, 1]).cpu()
                     skip = upsample(skip)
             out = out + skip
         return DataBag(data, output=out)
