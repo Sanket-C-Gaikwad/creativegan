@@ -219,6 +219,10 @@ class AnomalyDetector(object):
         return scores
     
     def predict_anomaly_masks(self, images, topk=None):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.train_outputs = {k: v.to(device) for k, v in self.train_outputs.items()}
+
         self.predict_anomaly_scores(images, topk=topk)
 
         score_map_list = []
@@ -228,8 +232,11 @@ class AnomalyDetector(object):
             for layer_name in ['layer1', 'layer2', 'layer3']:  # for each layer
 
                 # construct a gallery of features at all pixel locations of the K nearest neighbors
-                topk_feat_map = self.train_outputs[layer_name][self.topk_indexes[t_idx]].to(device)
+                topk_indexes_device = self.topk_indexes[t_idx].to(device)
+                topk_feat_map = self.train_outputs[layer_name][topk_indexes_device]
+
                 test_feat_map = self.test_outputs[layer_name][t_idx:t_idx + 1].to(device)
+                
                 feat_gallery = topk_feat_map.transpose(3, 1).flatten(0, 2).unsqueeze(-1).unsqueeze(-1)
 
                 # calculate distance matrix

@@ -31,7 +31,6 @@ def _parse_num_range(s):
     return [int(x) for x in vals]
 
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument('--name', type=str, required=True, help='Name of experiment')
 parser.add_argument('--model_path', type=str, required=True, help='Path to Stylegan model')
@@ -116,11 +115,8 @@ def segment(seg_model, images, ch=3, size=(224,224), threshold=0.5):
     images_tensor = torch.empty((len(images), ch, size[0], size[1]))
     for i in range(len(images)):
         images_tensor[i] = trans(images[i])
-    
-    seg_model = seg_model.to('cpu')
-    images_tensor = images_tensor.to('cpu')
-
-    seg_masks = seg_model(images_tensor).sigmoid().detach()
+        
+    seg_masks = seg_model(images_tensor.cuda()).sigmoid().detach().cpu()
     seg_masks = torch.where(seg_masks > threshold, torch.ones(seg_masks.size()), torch.zeros(seg_masks.size()))
     return seg_masks
 
@@ -214,11 +210,10 @@ if __name__ == '__main__':
     # Extract and cache embeddings of the normal images
     ad.load_train_features()
 
-    device = torch.device("cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    seg_model = unet.ResNetUNet(seg_class).cuda()
 
-    seg_model = unet.ResNetUNet(seg_class).to(device)
-
-    seg_model.load_state_dict(torch.load(seg_model_path, map_location=device))
+    seg_model.load_state_dict(torch.load(seg_model_path))
     seg_model.eval()
 
     print('unet loaded')
@@ -226,6 +221,7 @@ if __name__ == '__main__':
     # Copy Mask
     image = gw.render_image(copy_id)
     copy_anomaly = ad.predict_anomaly_masks([image])
+    torch.cuda.empty_cache()
     copy_mask = ad.threshold_masks(copy_anomaly, threshold=anomaly_threshold)[0]
     seg_mask = segment(seg_model, [image])[0]
 
@@ -379,7 +375,7 @@ if __name__ == '__main__':
         from torch.utils.data import DataLoader
         
         # SSIM NOVELTY
-        batch_size = 500
+        batch_size = 50
         gen_dataset1 = anomaly.NormalDataset(modified_dir, n=100, grayscale=False, normalize=False, resize=224, cropsize=224)
         gen_dataset2 = anomaly.NormalDataset(data_path, grayscale=False, normalize=False, resize=224, cropsize=224)
         gen_loader1 = DataLoader(gen_dataset1, batch_size=1, pin_memory=True)
@@ -389,12 +385,11 @@ if __name__ == '__main__':
         ssim_mat = torch.zeros((n, m))
     
         for i, xb in enumerate(gen_loader1):
-            x = xb.repeat(batch_size, 1, 1, 1).cpu()
+            x = xb.repeat(batch_size, 1, 1, 1)
             for j, y in enumerate(gen_loader2):
-                y = y.cpu()
                 if len(y) < batch_size:
-                    x = xb.repeat(len(y), 1, 1, 1).cpu()
-                ssim_mat[i][j*batch_size:j*batch_size+len(y)] = (1 - ssim(x, y, data_range=1, size_average=False))/2
+                    x = xb.repeat(len(y), 1, 1, 1)
+                ssim_mat[i][j*batch_size:j*batch_size+len(y)] = (1 - ssim(x.cuda(), y.cuda(), data_range=1, size_average=False))/2
 
         # print('SSIM Mean: ', ssim_mat.mean().numpy())
         # print('SSIM Top 1 Mean: ', torch.topk(ssim_mat, k=1).values.mean().numpy())
@@ -412,3 +407,5 @@ if __name__ == '__main__':
 
         anomaly_scores = np.concatenate(anomaly_scores)
         print('Average Novelty Score', anomaly_scores.mean())
+
+        
